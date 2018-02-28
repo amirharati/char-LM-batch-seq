@@ -12,6 +12,7 @@ import os
 import tensorflow as tf
 import numpy as np
 import threading
+import sys
 
 
 class CharLM:
@@ -59,8 +60,10 @@ class CharLM:
             itr += 1
             [res_loss, _, res_global_step, summary] = \
                 self.sess.run(self.model.trainOps + [self.summary_op], feed_dict={self.model.is_training: True})
+
             if res_global_step % 100 == 0:
                 print("loss: ", res_loss)
+                # print("prepL", np.exp(costs/lens))
             self.summary_writer.add_summary(summary,
                                             global_step=int(res_global_step))
             if res_global_step % 500 == 0:
@@ -74,7 +77,30 @@ class CharLM:
 
     def test(self):
         """ test the model. """
-        pass
+        # CHECKPOINTING
+        # # Load pretrained model to test
+        #latestCheckpoint = tf.train.latest_checkpoint(self.checkpoints_dir +
+        #                                              "model")
+        #restorer = tf.train.Saver(tf.global_variables(),
+        #                          write_version=tf.train.SaverDef.V2)
+        #restorer.restore(self.sess, latestCheckpoint)
+        print('Pre-trained model restored')
+        self.input_pipeline.start()
+        iteration = 0
+        while True:
+            try:
+                [cost, perplexity, summary] = \
+                    self.sess.run(self.model.testOps + [self.summary_op])
+            except tf.errors.OutOfRangeError:
+                print("Finished testing!")
+                break
+            self.summary_writer.add_summary(summary, global_step=int(iteration))
+            iteration += 1
+            print("cost:", cost)
+            print("perplexity:", perplexity)
+
+        self.input_pipeline.stop()
+
 
 
 class InputPipeline:
@@ -208,6 +234,9 @@ class Model:
         self.num_enqueue_threads = num_enqueue_threads
 
         self.is_training = tf.placeholder(dtype=tf.bool, name="is_training")
+        self.total_cost = tf.Variable(tf.constant(0.0), trainable=False)
+        self.total_len = tf.Variable(tf.constant(0.0), trainable=False)
+
         # define the model graph
         self._create_model()
         #if self.is_training is True:
@@ -309,7 +338,15 @@ class Model:
                 average_across_batch=True)
             # Update the cost
             self.cost = tf.reduce_sum(self.loss)
+
+            self.total_cost = self.total_cost.assign_add(self.cost)
+            self.total_len = self.total_len.assign_add(self.num_steps)
+            self.perplexity = tf.exp(tf.div(self.total_cost, self.total_len))
+
             tf.summary.scalar('sum_batch_cost', self.cost)
+            tf.summary.scalar('perplexity', self.perplexity)
+
+            self.testOps = [self.cost, self.perplexity]
 
     # TODO: make it private an define a property
     def _train_op(self):
@@ -320,7 +357,7 @@ class Model:
             # self.learning_rate = tf.Variable(0.0, trainable=False)
             self.initial_learning_rate = tf.constant(0.01)
             learning_rate = tf.train.exponential_decay(self.initial_learning_rate,
-                                                       self.global_step, 1000, 0.99)
+                                                       self.global_step, 500, 0.9)
             tf.summary.scalar("learning_rate", learning_rate)
             tvars = tf.trainable_variables()
             grads, _ = tf.clip_by_global_norm(tf.gradients(self.cost, tvars), 5)
@@ -415,6 +452,7 @@ class Model:
     def eval(self):
         pass
 
+
     @property
     def cost(self):
         return self._cost
@@ -422,24 +460,27 @@ class Model:
     @cost.setter
     def cost(self, value):
         self._cost = value
-    #    pass
-
-    #@property
-    #def learning_rate(self):
-    #    pass
 
 
 def main():
+    total = len(sys.argv)
+    if total < 3:
+        print("usage: python char-LM-using-batch-seq-with-state.py  train/test data_path.")
+        return
+    # Get the arguments list
+    cmdargs = str(sys.argv)
+    action = sys.argv[1]
+    data_path = sys.argv[2]
     with tf.Session() as sess:
         checkpoints_dir = "./checkpoints/"
         logs_dir = "./logs"
 
-        charlm_model = CharLM(batch_size=64,
-                              hidden_size=128,
+        charlm_model = CharLM(batch_size=16,
+                              hidden_size=300,
                               num_layers=1,
-                              num_steps=50,
+                              num_steps=10,
                               keep_prob=.8, # for now since sampling cant be done
-                              data_path="./data/simple-examples/data/ptb.train.txt",
+                              data_path=data_path,
                               sess=sess,
                               max_itr=20000,
                               checkpoints_dir=checkpoints_dir,
@@ -460,9 +501,10 @@ def main():
             print('Pre-trained model restored')
 
         # call the train
-        charlm_model.train(saver)
-
-
+        if action == "train":
+            charlm_model.train(saver)
+        elif action == "test":
+            charlm_model.test()
 
 if __name__ == "__main__":
     main()
